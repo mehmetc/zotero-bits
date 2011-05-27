@@ -18,8 +18,7 @@ Supports Primo 3
 Boston College (http://www.bc.edu/supersleuth),
 Oxford Libraries (http://solo.ouls.ox.ac.uk/)
 */
-
-function detectWeb(doc, url) {
+function detectWeb(doc, url) {	
 	var namespace = doc.documentElement.namespaceURI;
 	var nsResolver = namespace ? function(prefix) {
 			if (prefix == 'x') return namespace; else return null;
@@ -41,163 +40,240 @@ function detectWeb(doc, url) {
 // There is code for handling RIS, but let's stick with PNX for now.
 
 function doWeb(doc, url) {
+	var institution = getInstitution();
+	Zotero.debug(institution);
+	
 	var namespace = doc.documentElement.namespaceURI;
 	var nsResolver = namespace ? function(prefix) {
 			if (prefix == 'x') return namespace; else return null;
 		} : null;
 	var links = new Array();
+	var primoVersion = getPrimoVersion(doc, nsResolver);
 	
-	if (detectWeb(doc,url) == 'multiple') {
-			var items = new Object();
-			
-			var linkIterator = "";
-			var titleIterator = "";
-			if (doc.evaluate('//h2[contains(@class, "EXLResultTitle")]/a/@href', doc, nsResolver, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength == 0)
-			{
-				// Primo v2
-				linkIterator = doc.evaluate('//div[contains(@class, "title")]/a/@href', doc, nsResolver, XPathResult.ANY_TYPE, null);
-				titleIterator = doc.evaluate('//div[contains(@class, "title")]/a/span', doc, nsResolver, XPathResult.ANY_TYPE, null);
-			}
-			else if(doc.evaluate('//li[contains(@class, "EXLDetailsTab")]/a/@href', doc, nsResolver, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength == 0)
-			{
-				// Primo v3
-				linkIterator = doc.evaluate('//h2[contains(@class, "EXLResultTitle")]/a/@href', doc, nsResolver, XPathResult.ANY_TYPE, null);
-				titleIterator = doc.evaluate('//h2[contains(@class, "EXLResultTitle")]/a', doc, nsResolver, XPathResult.ANY_TYPE, null);
-			}
-			else {
-				// Primo v3.1
-				linkIterator = doc.evaluate('//li[contains(@class, "EXLDetailsTab")]/a/@href', doc, nsResolver, XPathResult.ANY_TYPE, null);
-				titleIterator = doc.evaluate('//h2[contains(@class, "EXLResultTitle")]', doc, nsResolver, XPathResult.ANY_TYPE, null);
-			}
-			
-			// try/catch for the case when there are no search results, let doc.evealuate fail quietly
-			try {
-				while (link = linkIterator.iterateNext(), title = titleIterator.iterateNext()) {
-					
-					// create an array containing the links and add '&showPnx=true' to the end
-					var xmlLink = Zotero.Utilities.trimInternal(link.textContent)+'&showPnx=true';
-					Zotero.debug(xmlLink);
-					var title = Zotero.Utilities.trimInternal(title.textContent);
-					items[xmlLink] = title;
-				}
-				items = Zotero.selectItems(items);
-				for(var link in items) {
-					links.push(link);
-				}
-			} catch(e) {
-				Zotero.debug("Search results contained zero items. "+e);
-				return;
-			}
+	
+	if (detectWeb(doc,url) == 'multiple') {			
+			var items   = new Object();
 
+			//Get all record id's and titles
+			switch(primoVersion) {
+				case 2:
+					var recordURLsIterator = doc.evaluate('//a[contains(@class, "EXLBriefResultsDisplayMediaimage")]/@href', doc, nsResolver, XPathResult.ANY_TYPE, null);
+					var titleIterator 	   = doc.evaluate('//div[contains(@class, "title")]/a/span', doc, nsResolver, XPathResult.ANY_TYPE, null);
+					try {
+						while(recordUrl = recordURLsIterator.iterateNext(), title = titleIterator.iterateNext()){
+							var rawRecordIds = recordUrl.textContent.match(/doc=(.*?)&/i);
+							var xmlLink      = "";
+							if (rawRecordIds != null && rawRecordIds.length == 2) {
+								xmlLink = Zotero.Utilities.trimInternal(buildLink(rawRecordIds[1], institution));
+							}
+							
+							if (xmlLink.length > 0) {
+								items[xmlLink] = Zotero.Utilities.trimInternal(title.textContent);
+							}
+						}
+						
+						items = Zotero.selectItems(items);
+						for(var link in items) {
+							links.push(link);
+						}						
+					} catch(e) {
+						Zotero.debug("Search results contained zero items. "+e);
+						return;
+					}
+					
+					break;
+				case 3:
+					var recordIdsIterator = doc.evaluate('//a[contains(@class, "EXLResultRecordId")]/@id', doc, nsResolver, XPathResult.ANY_TYPE, null);        
+					var titleIterator 	  = doc.evaluate('//h2[contains(@class, "EXLResultTitle")]', doc, nsResolver, XPathResult.ANY_TYPE, null);	
+				    try {
+						while (recordId = recordIdsIterator.iterateNext(), title = titleIterator.iterateNext()) {
+							var xmlLink = Zotero.Utilities.trimInternal(buildLink(recordId.textContent, institution));
+							items[xmlLink] = Zotero.Utilities.trimInternal(title.textContent);;
+						}
+						
+						items = Zotero.selectItems(items);
+						for(var link in items) {
+							links.push(link);
+						}						
+					} catch(e) {
+						Zotero.debug("Search results contained zero items. "+e);
+						return;
+					}					
+					break;
+				default:
+			}
 	} else {
 		links.push(url+'&showPnx=true');
 	}
 	
-	var doRIS = [];
-	
 	Zotero.Utilities.HTTP.doGet(links, function(text, response, url) {
-	
-		text = text.replace(/^<\?xml\s+version\s*=\s*(["'])[^\1]+\1[^?]*\?>/, ""); //because E4X is full of FAIL
-		try {
-			var xmldoc = new XML(text);
+		if (text != null) {
+			text = findRecord(text);
+			try {
+				var xmldoc = new XML(text);
 		
-			if (xmldoc.display.type.toString() == 'book') {
-				var item = new Zotero.Item("book");
-			} else if (xmldoc.display.type.toString() == 'audio') {
-				var item = new Zotero.Item("audioRecording");
-			} else if (xmldoc.display.type.toString() == 'video') {
-				var item = new Zotero.Item("videoRecording");
-			} else {
-				var item = new Zotero.Item("document");
-			}
-			item.title = xmldoc.display.title.toString();
-		
-			var creators = xmldoc.display.creator.toString().replace(/\d{4}-(\d{4})?/, '').split("; ");
-			var contributors = xmldoc.display.contributor.toString().replace(/\d{4}-(\d{4})?/, '').split("; ");
-		
-			if (!creators[0]) { // <contributor> not available using <contributor> as author instead
-				creators = contributors;
-				contributors = null;
-			}
-			for (creator in creators) {
-				if (creators[creator]) {
-					item.creators.push(Zotero.Utilities.cleanAuthor(creators[creator], "author"));
+				if (xmldoc.display.type.toString() == 'book') {
+					var item = new Zotero.Item("book");
+				} else if (xmldoc.display.type.toString() == 'audio') {
+					var item = new Zotero.Item("audioRecording");
+				} else if (xmldoc.display.type.toString() == 'video') {
+					var item = new Zotero.Item("videoRecording");
+				} else {
+					var item = new Zotero.Item("document");
 				}
-			}
+				item.title = xmldoc.display.title.toString();
 		
-			for (contributor in contributors) {
-				if (contributors[contributor]) {
-					item.creators.push(Zotero.Utilities.cleanAuthor(contributors[contributor], "contributor"));
+				var creators = xmldoc.display.creator.toString().replace(/\d{4}-(\d{4})?/, '').split("; ");
+				var contributors = xmldoc.display.contributor.toString().replace(/\d{4}-(\d{4})?/, '').split("; ");
+		
+				if (!creators[0]) { // <contributor> not available using <contributor> as author instead
+					creators = contributors;
+					contributors = null;
 				}
-			}
+				for (creator in creators) {
+					if (creators[creator]) {
+						item.creators.push(Zotero.Utilities.cleanAuthor(creators[creator], "author"));
+					}
+				}
 		
-			var pubplace = xmldoc.display.publisher.toString().split(" : ");
-			if (pubplace) {
-				item.place = pubplace[0];
-				item.publisher = pubplace[1];
-			}
+				for (contributor in contributors) {
+					if (contributors[contributor]) {
+						item.creators.push(Zotero.Utilities.cleanAuthor(contributors[contributor], "contributor"));
+					}
+				}
 		
-			var date = xmldoc.display.creationdate.toString();
-			if (date) item.date = date.match(/\d+/)[0];
+				var pubplace = xmldoc.display.publisher.toString().split(" : ");
+				if (pubplace) {
+					item.place = pubplace[0];
+					item.publisher = pubplace[1];
+				}
 		
-			var language = xmldoc.display.language.toString();
-			// We really hope that Primo always uses ISO 639-2
-			// This looks odd, but it just means that we're using the verbatim
-			// content if it isn't in our ISO 639-2 hash.
-			if (language)
-				if(!(item.language = iso6392(language)))
-					item.language = language;
+				var date = xmldoc.display.creationdate.toString();
+				if (date){
+					tmp_date = date.match(/\d+/);
+					if (tmp_date != null) {
+						item.date = tmp_date[0];
+					}
+					else {
+						item.date = date;
+					}
+				}
+		
+				var language = xmldoc.display.language.toString();
+				// We really hope that Primo always uses ISO 639-2
+				// This looks odd, but it just means that we're using the verbatim
+				// content if it isn't in our ISO 639-2 hash.
+				if (language)
+					if(!(item.language = iso6392(language)))
+						item.language = language;
 
 		
-			var pages = xmldoc.display.format.toString().match(/(\d+)\sp\./);
-			if (pages) item.pages = pages[1];
+				var pages = xmldoc.display.format.toString().match(/(\d+)\sp\./);
+				if (pages) item.pages = pages[1];
 	
-			// The identifier field is supposed to have standardized format, but
-			// the super-tolerant idCheck should be better than a regex.
-			// (although note that it will reject invalid ISBNs)	
-			var locators = idCheck(xmldoc.display.identifier.toString());
-			if (locators.isbn10) item.ISBN = locators.isbn10;
-			if (locators.isbn13) item.ISBN = locators.isbn13;
-			if (locators.issn) item.ISSN = locators.issn;
+				// The identifier field is supposed to have standardized format, but
+				// the super-tolerant idCheck should be better than a regex.
+				// (although note that it will reject invalid ISBNs)	
+				var locators = idCheck(xmldoc.display.identifier.toString());
+				if (locators.isbn10) item.ISBN = locators.isbn10;
+				if (locators.isbn13) item.ISBN = locators.isbn13;
+				if (locators.issn) item.ISSN = locators.issn;
 		
-			var edition = xmldoc.display.edition.toString();
-			if (edition) item.edition = edition;
+				var edition = xmldoc.display.edition.toString();
+				if (edition) item.edition = edition;
 		
-			for each (subject in xmldoc.search.subject) {
-				item.tags.push(subject.toString());
+				for each (subject in xmldoc.search.subject) {
+					item.tags.push(subject.toString());
+				}
+				// does callNumber get stored anywhere else in the xml?
+				item.callNumber = xmldoc.enrichment.classificationlcc[0];
+		
+				item.complete();
+			} catch (e) {
+				Zotero.debug(e);
 			}
-			// does callNumber get stored anywhere else in the xml?
-			item.callNumber = xmldoc.enrichment.classificationlcc[0];
-		
-			item.complete();
-		} catch (e) {
-			// When we fail using PNX, we'll try to use RIS, but sometimes that's missing too
-			doRIS.push(url);
 		}
-	}, function() {
-		// If we have a broken item, we'll try to get it using RIS
-		if (doRIS.length == 0) {
-			Zotero.done();
-			return true;
-		}
-		for (var i in doRIS) doRIS[i] = doRIS[i].replace(/showPnx/,"showRIS");
-	       	Zotero.Utilities.processDocuments(doRIS, function(doc) {
-        	       var text = doc.evaluate('//textarea[@name="ImportData"]', doc, nsResolver, XPathResult.ANY_TYPE, null).iterateNext();
-        	       if (!text) {
-	        	       Zotero.debug("No RIS‌ data for item, sorry!");
-	        	} 
-        	       text = text.textContent.replace(/[ \t]*$/gm,"");
-        	       text = text.replace(/[\r\n]+[ \t]*[\r\n]+/g,"\n");
-        	       if (!text.match(/^TY/g)) text = "TY  - GENERAL\n" + text;
-        	       Zotero.debug(text);
-               		var translator = Zotero.loadTranslator("import");
-               		translator.setTranslator("32d59d2d-b65a-4da4-b0a3-bdd3cfb979e7");
-               		translator.setString(text);
-               		translator.translate();
-		}, function() {Zotero.done();})
-	});
+	}, function() {Zotero.done();});
 	Zotero.wait();
 }
+
+
+function getPrimoVersion(doc, nsResolver) {
+	//Determine Primo version
+	var primoVersion = -1;
+	if (doc.evaluate('//li[contains(@class, "EXLDetailsTab")]/a/@href', doc, nsResolver, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength == 0) {
+		primoVersion = 2;
+	}
+	else if (doc.evaluate('//li[contains(@class, "EXLDetailsTab")]/a/@href', doc, nsResolver, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength > 0) {
+		primoVersion = 3;
+	}
+	
+	return primoVersion;	
+}
+
+function buildLink(recordId, institution){
+	var search      = "local";
+//	var institution = getInstitution(); //TODO: figure out how to find the correct institution code
+
+	if ((recordId.substring(0, 5) != 'dedup')) {
+		if ((recordId.substring(0, 2) == 'TN') ) {
+			search = "adaptor,primo_central_multiple_fe";
+			recordId = recordId.substring(3);
+		}
+		
+		var query   = 'any,contains,' + recordId;
+
+		return '/PrimoWebServices/xservice/search/brief?institution=' + institution + '&query=' + query + '&onCampus=false&indx=1&bulkSize=1&dym=false&highlight=false&lang=eng&loc=' + search;		
+	}
+	
+	return "";
+}
+
+function findRecord(text) {
+	//TODO:Readup on Mozilla XPath
+	text = text.replace(/^<\?xml\s+version\s*=\s*(["'])[^\1]+\1[^?]*\?>/, ""); //because E4X is full of FAIL	
+	var start_record = text.search("<record>");
+	var stop_record  = text.search("</record>") + "</record>".length;
+
+	if (start_record == -1 && stop_record == 8) { //Primo Cetral uses namespace prefixes
+		start_record = text.search("<prim:record>");
+		stop_record  = text.search("</prim:record>") + "</prim:record>".length;
+		text = text.substring(start_record, stop_record);
+		text = text.replace(/\<prim\:/g, "<");
+		text = text.replace(/\<\/prim\:/g, "</");
+	}
+	else {
+		text = text.substring(start_record, stop_record);
+	}
+	
+	return text;
+}
+
+function getInstitution() {	
+	var institution = "";
+
+	Zotero.Utilities.HTTP.doGet("/primo_library/libweb/zotero/institution_code.jsp", 
+		function(text, response, url) {
+			try {
+			institution = Zotero.Utilities.trimInternal(text);
+			}
+			catch(e) {
+				Zotero.debug('OOOPs:' + e)
+			}
+			Zotero.done();
+		}
+	);
+	
+	Zotero.wait();
+
+	return institution;
+/* instutition_code.jsp
+<%@ page import="com.exlibris.primo.utils.SessionUtils" %>
+<% String institution = SessionUtils.getInstitutionCode(request); %>
+<%=institution%>
+*/	
+}
+
 
 /* The next two functions are logic that could be bundled away into the translator toolkit. */
 
